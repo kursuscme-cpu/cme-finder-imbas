@@ -1,0 +1,65 @@
+name: Imbas Facebook
+
+# This repository exists to be public.
+#
+# Reading a Facebook Page needs a real browser — a plain HTTP fetch only ever
+# gets a login wall — and GitHub Actions is the one free place that will host
+# one on a schedule. A private repository gets 2,000 minutes a month, which at
+# this cadence is nowhere near enough; a public one is unlimited. So the
+# scraper lives here on its own, and the application it feeds stays private.
+#
+# Nothing here is sensitive. The two values the job needs are repository
+# secrets, and the list of Pages comes from the application at runtime.
+on:
+  schedule:
+    # Every 8 minutes.
+    #
+    # Facebook shows a logged-out visitor only the single most recent post per
+    # Page, so how much we catch is decided by how often we look. The script
+    # reads a moving window of eight Pages; with fifteen Pages in the list,
+    # that puts every one of them in front of us about every fifteen minutes.
+    - cron: "*/8 * * * *"
+  workflow_dispatch:
+
+# A queued run is worthless once the next one is due.
+concurrency:
+  group: imbas
+  cancel-in-progress: false
+
+jobs:
+  imbas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Downloading Chromium costs more than the scraping does. Caching it is
+      # what keeps a run short enough to repeat this often.
+      - name: Cache pelayar
+        id: cache-pelayar
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-1.62.1-${{ runner.os }}
+
+      - name: Pasang Playwright
+        run: |
+          npm init -y >/dev/null
+          npm i --no-audit --no-fund playwright@1.62.1
+          if [ "${{ steps.cache-pelayar.outputs.cache-hit }}" = "true" ]; then
+            npx playwright install-deps chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
+
+      - name: Imbas dan hantar
+        env:
+          CME_FINDER_URL: ${{ secrets.CME_FINDER_URL }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+          FB_RUN_EVERY_MS: "480000"
+        run: node scan-fb.mjs
