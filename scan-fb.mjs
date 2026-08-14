@@ -76,10 +76,59 @@ const EXPAND = () => {
   return n;
 };
 
-const READ_POSTS = () =>
-  [...document.querySelectorAll('div[role="article"]')]
-    .map((el) => el.innerText.replace(/\s+/g, " ").trim())
-    .filter((t) => t.length > 60);
+/**
+ * Each post's text, and the permalink to that actual post.
+ *
+ * We used to send only the Page URL, so "siaran asal" in the app dropped the
+ * user on the Page's front door and left them to scroll for the post we were
+ * describing — by which time it may not even be on the first screen any more.
+ * The link is a promise to show the evidence; the front door is not evidence.
+ *
+ * Facebook does render a permalink inside each article, wrapped in tracking
+ * parameters. Ranked because one article carries several: the canonical
+ * `/posts/` link first, then video and reel forms. Anything pointing at a
+ * comment is skipped — that is a reply, not the post.
+ */
+const READ_POSTS = () => {
+  const RANK = [/\/posts\//, /permalink\.php/, /story_fbid=/, /\/videos\//, /\/reel\//, /\/photo/];
+
+  const tidy = (href) => {
+    try {
+      const u = new URL(href, location.origin);
+      for (const k of [...u.searchParams.keys()]) {
+        // `__cft__`, `__tn__`, `ref`, `rdid` are click tracking; the rest of a
+        // permalink.php query is the post's identity and must survive.
+        if (k.startsWith("__") || ["ref", "rdid", "notif_id", "notif_t"].includes(k)) {
+          u.searchParams.delete(k);
+        }
+      }
+      u.hash = "";
+      return u.toString();
+    } catch {
+      return null;
+    }
+  };
+
+  return [...document.querySelectorAll('div[role="article"]')]
+    .map((el) => {
+      let best = null;
+      let bestRank = RANK.length;
+      for (const a of el.querySelectorAll("a[href]")) {
+        const href = a.getAttribute("href") || "";
+        if (href.includes("comment_id")) continue;
+        const rank = RANK.findIndex((re) => re.test(href));
+        if (rank >= 0 && rank < bestRank) {
+          bestRank = rank;
+          best = href;
+        }
+      }
+      return {
+        text: (el.innerText || "").replace(/\s+/g, " ").trim(),
+        link: best ? tidy(best) : null,
+      };
+    })
+    .filter((p) => p.text.length > 60);
+};
 
 /**
  * "Pejabat Kesihatan Daerah Besut 1j · TAJUK…" — drop the byline prefix.
@@ -127,7 +176,9 @@ async function readPage(browser, url) {
     await page.waitForTimeout(1500);
 
     const raw = await page.evaluate(READ_POSTS);
-    return raw.map((t) => stripFooter(stripByline(t))).filter((t) => t.length > 60);
+    return raw
+      .map((p) => ({ text: stripFooter(stripByline(p.text)), link: p.link }))
+      .filter((p) => p.text.length > 60);
   } catch (e) {
     console.log(`  GAGAL ${url}: ${e.message.split("\n")[0]}`);
     return [];
@@ -173,15 +224,23 @@ const turnOf = window_(pages);
 console.log(`Mengimbas ${turnOf.length} daripada ${pages.length} page…\n`);
 for (const url of turnOf) {
   const posts = await readPage(browser, url);
-  console.log(`  ${posts.length} siaran  ${url}`);
-  for (const [i, text] of posts.entries()) {
+  const berpautan = posts.filter((p) => p.link).length;
+  console.log(`  ${posts.length} siaran (${berpautan} berpautan)  ${url}`);
+  for (const p of posts) console.log(`      ${p.link ?? "(tiada pautan siaran)"}`);
+  for (const [i, post] of posts.entries()) {
     items.push({
-      text,
-      url,
+      text: post.text,
+      // Where the user is sent when they ask to see the post for themselves.
+      // Falls back to the Page when Facebook renders no permalink, which is
+      // still better than nothing but is not the promise we want to make.
+      url: post.link ?? url,
+      // Kept separate because attribution matches a source by its exact Page
+      // URL. Sending only the permalink would leave every post unattributed.
+      pageUrl: url,
       postedAt: new Date().toISOString(),
       // Same post on the next run must produce the same id, or every scan
       // re-ingests everything. Hash the text rather than trusting position.
-      id: `${new URL(url).pathname.replace(/\//g, "")}-${hash(text)}-${i === 0 ? "top" : "n"}`,
+      id: `${new URL(url).pathname.replace(/\//g, "")}-${hash(post.text)}-${i === 0 ? "top" : "n"}`,
     });
   }
 }
