@@ -26,6 +26,15 @@ on:
     # pass puts every Page in front of us about every fifteen minutes.
     - cron: "0 * * * *"
   workflow_dispatch:
+    # So the window width can be measured against Facebook's real behaviour
+    # rather than argued about. The default is what the schedule uses.
+    inputs:
+      pages_per_run:
+        description: "Berapa page satu pusingan"
+        default: "8"
+      loop_minutes:
+        description: "Berapa lama kerja ini berulang"
+        default: "56"
 
 # The job now occupies most of the hour, so a schedule that fires late must
 # queue behind it rather than run a second browser alongside the first.
@@ -71,5 +80,6 @@ jobs:
           CME_FINDER_URL: ${{ secrets.CME_FINDER_URL }}
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
           FB_RUN_EVERY_MS: "480000"
-          FB_LOOP_MINUTES: "56"
+          FB_PAGES_PER_RUN: ${{ inputs.pages_per_run || '8' }}
+          FB_LOOP_MINUTES: ${{ inputs.loop_minutes || '56' }}
         run: node scan-fb.mjs
