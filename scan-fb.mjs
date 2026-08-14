@@ -217,51 +217,90 @@ function window_(list, size = PER_RUN) {
   return Array.from({ length: n }, (_, i) => list[(turn + i) % list.length]);
 }
 
-const browser = await chromium.launch();
-const items = [];
-
-const turnOf = window_(pages);
-console.log(`Mengimbas ${turnOf.length} daripada ${pages.length} page…\n`);
-for (const url of turnOf) {
-  const posts = await readPage(browser, url);
-  const berpautan = posts.filter((p) => p.link).length;
-  console.log(`  ${posts.length} siaran (${berpautan} berpautan)  ${url}`);
-  for (const p of posts) console.log(`      ${p.link ?? "(tiada pautan siaran)"}`);
-  for (const [i, post] of posts.entries()) {
-    items.push({
-      text: post.text,
-      // Where the user is sent when they ask to see the post for themselves.
-      // Falls back to the Page when Facebook renders no permalink, which is
-      // still better than nothing but is not the promise we want to make.
-      url: post.link ?? url,
-      // Kept separate because attribution matches a source by its exact Page
-      // URL. Sending only the permalink would leave every post unattributed.
-      pageUrl: url,
-      postedAt: new Date().toISOString(),
-      // Same post on the next run must produce the same id, or every scan
-      // re-ingests everything. Hash the text rather than trusting position.
-      id: `${new URL(url).pathname.replace(/\//g, "")}-${hash(post.text)}-${i === 0 ? "top" : "n"}`,
-    });
-  }
-}
-await browser.close();
-
 function hash(s) {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
   return (h >>> 0).toString(36);
 }
 
-console.log(`\nJumlah ${items.length} siaran. Menghantar…`);
-if (!items.length) {
-  console.log("Tiada siaran — kemungkinan Facebook menyekat runner ini.");
-  process.exit(0);
+/** One window of Pages: read them, send whatever came back. */
+async function pass() {
+  const browser = await chromium.launch();
+  const items = [];
+  try {
+    const turnOf = window_(pages);
+    console.log(`Mengimbas ${turnOf.length} daripada ${pages.length} page…`);
+    for (const url of turnOf) {
+      const posts = await readPage(browser, url);
+      const berpautan = posts.filter((p) => p.link).length;
+      console.log(`  ${posts.length} siaran (${berpautan} berpautan)  ${url}`);
+      for (const [i, post] of posts.entries()) {
+        items.push({
+          text: post.text,
+          // Where the user is sent when they ask to see the post for
+          // themselves. Falls back to the Page when Facebook renders no
+          // permalink — better than nothing, but not the promise we want.
+          url: post.link ?? url,
+          // Kept separate because attribution matches a source by its exact
+          // Page URL. Sending only the permalink would leave every post
+          // unattributed.
+          pageUrl: url,
+          postedAt: new Date().toISOString(),
+          // Same post on the next run must produce the same id, or every scan
+          // re-ingests everything. Hash the text rather than trusting position.
+          id: `${new URL(url).pathname.replace(/\//g, "")}-${hash(post.text)}-${i === 0 ? "top" : "n"}`,
+        });
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+
+  if (!items.length) {
+    console.log("Tiada siaran — kemungkinan Facebook menyekat runner ini.");
+    return;
+  }
+
+  const res = await fetch(`${APP}/api/webhook/masuk`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ secret: SECRET, source: "fb-actions", items }),
+  });
+  console.log(`  HTTP ${res.status}  ${await res.text()}`);
 }
 
-const res = await fetch(`${APP}/api/webhook/masuk`, {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({ secret: SECRET, source: "fb-actions", items }),
-});
-console.log(`HTTP ${res.status}  ${await res.text()}`);
-if (!res.ok) process.exit(1);
+/**
+ * Loop inside one job rather than trusting the schedule.
+ *
+ * GitHub treats an every-eight-minutes cron as a suggestion. Measured over six
+ * consecutive runs, the gaps were 47, 53, 65, 82 and 39 minutes — a
+ * high-frequency schedule gets collapsed to roughly hourly under load, which
+ * quietly turned a fifteen-minute promise into an hour-and-a-half one. An
+ * hourly schedule is honoured reliably, so take the hour and control the
+ * minutes ourselves.
+ *
+ * Runner minutes are free on a public repository, so a job that sits there for
+ * most of an hour costs nothing. `concurrency` in the workflow stops a late
+ * schedule from stacking two of these on top of each other.
+ */
+const LOOP_MS = Number(process.env.FB_LOOP_MINUTES ?? 56) * 60_000;
+const GAP_MS = Number(process.env.FB_RUN_EVERY_MS ?? 480_000);
+const until = Date.now() + LOOP_MS;
+
+for (let n = 1; ; n++) {
+  const started = Date.now();
+  console.log(`\n--- pusingan ${n} @ ${new Date().toISOString().slice(11, 19)} ---`);
+  try {
+    await pass();
+  } catch (e) {
+    // One bad pass must not end the hour; the next one is minutes away.
+    console.log(`  GAGAL: ${e.message.split("\n")[0]}`);
+  }
+
+  const next = started + GAP_MS;
+  if (next >= until) break;
+  const wait = Math.max(0, next - Date.now());
+  console.log(`  tidur ${Math.round(wait / 1000)}s`);
+  await new Promise((r) => setTimeout(r, wait));
+}
+console.log("\nSelesai untuk jam ini.");

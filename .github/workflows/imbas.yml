@@ -12,16 +12,23 @@ name: Imbas Facebook
 # secrets, and the list of Pages comes from the application at runtime.
 on:
   schedule:
-    # Every 8 minutes.
+    # Hourly — and the job then scans every eight minutes from inside itself.
+    #
+    # `*/8 * * * *` looked right and was not honoured. Measured over six
+    # consecutive runs the gaps were 47, 53, 65, 82 and 39 minutes: GitHub
+    # treats a high-frequency schedule as a suggestion and collapses it under
+    # load. An hourly schedule is honoured reliably, so the workflow takes the
+    # hour and `scan-fb.mjs` controls the minutes.
     #
     # Facebook shows a logged-out visitor only the single most recent post per
     # Page, so how much we catch is decided by how often we look. The script
-    # reads a moving window of eight Pages; with fifteen Pages in the list,
-    # that puts every one of them in front of us about every fifteen minutes.
-    - cron: "*/8 * * * *"
+    # reads a moving window of eight of the fifteen Pages, so an eight-minute
+    # pass puts every Page in front of us about every fifteen minutes.
+    - cron: "0 * * * *"
   workflow_dispatch:
 
-# A queued run is worthless once the next one is due.
+# The job now occupies most of the hour, so a schedule that fires late must
+# queue behind it rather than run a second browser alongside the first.
 concurrency:
   group: imbas
   cancel-in-progress: false
@@ -29,7 +36,9 @@ concurrency:
 jobs:
   imbas:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Long enough for the internal loop plus setup, short enough that a wedged
+    # run cannot hold the concurrency group past its hour.
+    timeout-minutes: 70
 
     steps:
       - uses: actions/checkout@v4
@@ -62,4 +71,5 @@ jobs:
           CME_FINDER_URL: ${{ secrets.CME_FINDER_URL }}
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
           FB_RUN_EVERY_MS: "480000"
+          FB_LOOP_MINUTES: "56"
         run: node scan-fb.mjs
