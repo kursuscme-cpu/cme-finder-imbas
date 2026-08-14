@@ -270,6 +270,28 @@ async function pass() {
 }
 
 /**
+ * Ask the app to sweep the mailbox for certificates.
+ *
+ * We are already awake and waiting between passes, and unlike the app's own
+ * cron we are not racing a 30-second client timeout. So the certificate check
+ * rides along here every eight minutes instead of once an hour.
+ */
+async function sweepCertificates() {
+  try {
+    const res = await fetch(`${APP}/api/webhook/sijil`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ secret: SECRET }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    console.log(`  sijil HTTP ${res.status}  ${await res.text()}`);
+  } catch (e) {
+    // A mailbox that will not answer must not cost us the Facebook pass.
+    console.log(`  sijil GAGAL: ${e.message.split("\n")[0]}`);
+  }
+}
+
+/**
  * Loop inside one job rather than trusting the schedule.
  *
  * GitHub treats an every-eight-minutes cron as a suggestion. Measured over six
@@ -296,6 +318,7 @@ for (let n = 1; ; n++) {
     // One bad pass must not end the hour; the next one is minutes away.
     console.log(`  GAGAL: ${e.message.split("\n")[0]}`);
   }
+  await sweepCertificates();
 
   const next = started + GAP_MS;
   if (next >= until) break;
