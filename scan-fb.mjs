@@ -223,6 +223,21 @@ function hash(s) {
   return (h >>> 0).toString(36);
 }
 
+/**
+ * Every call to the app wakes the database, and Neon's free plan bills the
+ * wall-clock time it stays awake — it only sleeps after five idle minutes.
+ *
+ * Reading Facebook costs nothing, but *telling the app* about posts it already
+ * has costs compute hours. Scanning every eight minutes therefore kept the
+ * database awake about five minutes in every eight, against five in fifteen
+ * before: roughly 110 CU-hours a month against a free allowance of 100.
+ *
+ * Facebook posts do not change between passes. So remember what was sent last
+ * time and stay quiet when nothing is new — which is almost always. Reading
+ * stays fast; only the talking is rationed.
+ */
+let lastSent = "";
+
 /** One window of Pages: read them, send whatever came back. */
 async function pass() {
   const browser = await chromium.launch();
@@ -258,8 +273,15 @@ async function pass() {
 
   if (!items.length) {
     console.log("Tiada siaran — kemungkinan Facebook menyekat runner ini.");
-    return;
+    return false;
   }
+
+  const fingerprint = items.map((i) => i.id).sort().join("|");
+  if (fingerprint === lastSent) {
+    console.log(`  ${items.length} siaran, tiada yang baharu — tidak dihantar`);
+    return false;
+  }
+  lastSent = fingerprint;
 
   const res = await fetch(`${APP}/api/webhook/masuk`, {
     method: "POST",
@@ -267,6 +289,7 @@ async function pass() {
     body: JSON.stringify({ secret: SECRET, source: "fb-actions", items }),
   });
   console.log(`  HTTP ${res.status}  ${await res.text()}`);
+  return true;
 }
 
 /**
@@ -312,13 +335,20 @@ const until = Date.now() + LOOP_MS;
 for (let n = 1; ; n++) {
   const started = Date.now();
   console.log(`\n--- pusingan ${n} @ ${new Date().toISOString().slice(11, 19)} ---`);
+  let sent = false;
   try {
-    await pass();
+    sent = await pass();
   } catch (e) {
     // One bad pass must not end the hour; the next one is minutes away.
     console.log(`  GAGAL: ${e.message.split("\n")[0]}`);
   }
-  await sweepCertificates();
+
+  // Sweep when the database is already awake because we just wrote to it, and
+  // otherwise every third pass. Certificates arrive on a scale of days, so a
+  // worst case of twenty-four minutes costs the user nothing — whereas waking
+  // Neon every eight minutes purely to find an empty mailbox is the difference
+  // between staying inside the free plan and leaving it.
+  if (sent || n % 3 === 1) await sweepCertificates();
 
   const next = started + GAP_MS;
   if (next >= until) break;

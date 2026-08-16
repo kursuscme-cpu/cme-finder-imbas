@@ -36,11 +36,16 @@ on:
         description: "Berapa lama kerja ini berulang"
         default: "56"
 
-# The job now occupies most of the hour, so a schedule that fires late must
-# queue behind it rather than run a second browser alongside the first.
+# The newest run wins.
+#
+# The job occupies most of the hour and the schedule fires late, so the next
+# one arrives while this one is still looping. Queueing it looked polite and
+# was measured doing harm: the run at 21:26 was cancelled while waiting, and
+# nothing scanned between 21:25 and 22:28 — a 63-minute blind spot. Replacing
+# the old run instead costs only the tail of a loop that was nearly done.
 concurrency:
   group: imbas
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   imbas:
