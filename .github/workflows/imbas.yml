@@ -34,7 +34,7 @@ on:
         default: "8"
       loop_minutes:
         description: "Berapa lama kerja ini berulang"
-        default: "56"
+        default: "50"
 
 # The newest run wins.
 #
@@ -86,5 +86,5 @@ jobs:
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
           FB_RUN_EVERY_MS: "480000"
           FB_PAGES_PER_RUN: ${{ inputs.pages_per_run || '8' }}
-          FB_LOOP_MINUTES: ${{ inputs.loop_minutes || '56' }}
+          FB_LOOP_MINUTES: ${{ inputs.loop_minutes || '50' }}
         run: node scan-fb.mjs
