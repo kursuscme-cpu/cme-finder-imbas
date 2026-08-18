@@ -123,7 +123,7 @@ const READ_POSTS = () => {
         }
       }
       return {
-        text: (el.innerText || "").replace(/\s+/g, " ").trim(),
+        text: el.innerText || "",
         link: best ? tidy(best) : null,
       };
     })
@@ -131,28 +131,87 @@ const READ_POSTS = () => {
 };
 
 /**
- * "Pejabat Kesihatan Daerah Besut 1j · TAJUK…" — drop the byline prefix.
+ * Turn Facebook's innerText back into something a person can read.
  *
- * A shared post carries two of them, one for the page that shared it and one
- * for the original author, so this repeats until nothing is left to remove.
- * Anchored and single-replace only ever stripped the first, which left the
- * second sitting in the title.
+ * innerText puts every text node on its own line, so a paragraph breaks
+ * wherever a link or a bold run sits inside it — one real post arrived with a
+ * single URL split across four lines. Flattening everything to one line fixed
+ * the URLs and destroyed the paragraphs, which is what made a stored post
+ * unreadable: title, date, speakers and hashtags all run together.
+ *
+ * Rejoin only what was cut mid-phrase. Facebook leaves the evidence in the
+ * whitespace: a source line that ends in a space was interrupted between
+ * words, and one that ends in a hyphen or slash with no space was interrupted
+ * inside a URL — which must be closed up with nothing between.
+ *
+ * ponytail: punctuation and whitespace heuristics, not a DOM parser. It
+ * restores the shape of ordinary posts; a paragraph ending without punctuation
+ * may still be joined to the next. Upgrade path is walking the element tree
+ * rather than reading innerText.
  */
-function stripByline(text) {
-  const BYLINE = /^.{0,80}?\s\d+\s?[jhmd]\s·\s/;
-  let out = text.trim();
-  for (let i = 0; i < 3 && BYLINE.test(out); i++) {
-    out = out.replace(BYLINE, "").trim();
+function reflow(raw) {
+  const out = [];
+  let openEnded = false; // previous source line stopped between words
+  let urlCut = false; // ...or inside a URL
+
+  for (const source of raw.split("\n")) {
+    const text = source.replace(/[^\S\n]+/g, " ").trim();
+    if (!text) {
+      openEnded = urlCut = false;
+      if (out.length && out[out.length - 1] !== "") out.push("");
+      continue;
+    }
+
+    const prev = out.length ? out[out.length - 1] : null;
+    if (prev) {
+      if (urlCut) out[out.length - 1] = prev + text;
+      else if (openEnded && !/[.!?:;]$/.test(prev)) out[out.length - 1] = `${prev} ${text}`;
+      else out.push(text);
+    } else {
+      out.push(text);
+    }
+
+    const endsWithSpace = /\s$/.test(source);
+    openEnded = endsWithSpace;
+    urlCut = !endsWithSpace && /[-/]$/.test(text);
   }
-  return out;
+
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-/** Reactions and comment counts trail every post and are noise to the parser. */
+/**
+ * Everything from the reaction bar down belongs to Facebook and its readers.
+ *
+ * Below it sit reaction counts and then other people's comments, which were
+ * being stored as part of the post and read by the parser as though the
+ * organiser had written them.
+ */
 function stripFooter(text) {
-  return text
-    .replace(/\s*(Semua reaksi|All reactions)\s*:.*$/i, "")
-    .replace(/\s*\d+\s*(Suka|Like|Komen|Comment|Kongsi|Share)\b.*$/i, "")
-    .trim();
+  // "Lihat Sedikit" is appended to the last line rather than given one of its
+  // own, so an anchored search walks straight past it.
+  text = text.replace(/[ 	]*(?:Lihat Sedikit|See less)[ 	]*$/im, "");
+  const cut = text.search(
+    /^[ \t]*(?:Semua reaksi|All reactions|Lihat Sedikit|See less|Lihat seterusnya|See more)\b/im,
+  );
+  return (cut > 0 ? text.slice(0, cut) : text).trim();
+}
+
+/**
+ * "Jabatan Kesihatan Negeri Perlis" / "2j" / "·" — the byline, a line each.
+ *
+ * Runs before reflow, while the lines are still separate: joined up first, the
+ * page name and the post age become one line of prose and cannot be told from
+ * the post itself. A shared post carries two of these blocks.
+ */
+function stripByline(text) {
+  const lines = text.split("\n");
+  const AGE = /^\s*\d+\s?[jhmdwsy]\s*(·.*)?$/i;
+  let start = 0;
+  for (let i = 0; i < Math.min(lines.length, 8); i++) {
+    if (AGE.test(lines[i])) start = i + 1;
+  }
+  while (start < lines.length && /^[\s·•|-]*$/.test(lines[start])) start++;
+  return lines.slice(start).join("\n").trim();
 }
 
 async function readPage(browser, url) {
@@ -177,7 +236,7 @@ async function readPage(browser, url) {
 
     const raw = await page.evaluate(READ_POSTS);
     return raw
-      .map((p) => ({ text: stripFooter(stripByline(p.text)), link: p.link }))
+      .map((p) => ({ text: reflow(stripFooter(stripByline(p.text))), link: p.link }))
       .filter((p) => p.text.length > 60);
   } catch (e) {
     console.log(`  GAGAL ${url}: ${e.message.split("\n")[0]}`);
