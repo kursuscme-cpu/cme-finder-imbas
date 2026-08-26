@@ -53,6 +53,84 @@ const pages = (await pageList()).map((s) => s.trim()).filter((s) => s.startsWith
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+/**
+ * Sign in with a session cookie, when one is supplied.
+ *
+ * Signed out, Facebook shows a visitor the single most recent post per Page
+ * and nothing scrolling can reveal. Signed in, the whole feed loads — one
+ * visit returns a week of posts instead of one, which is the difference
+ * between hoping we looked at the right minute and simply having them all.
+ *
+ * Cookies, not a username and password. The login form is the most heavily
+ * defended part of the site and typing into it from a datacentre address
+ * triggers a checkpoint immediately; replaying an existing session does not.
+ * It also means no password is stored anywhere — the secret is a session that
+ * can be revoked from Facebook's own security page at any time.
+ *
+ * FB_COOKIES holds what the browser already has: either a raw
+ * "c_user=…; xs=…" header string, or the JSON array a cookie exporter gives.
+ * Empty or expired, everything falls back to the signed-out path rather than
+ * failing — a thinner scrape still beats no scrape.
+ */
+function parseCookies(raw) {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("[")) {
+    return JSON.parse(trimmed).map((c) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain?.includes("facebook.com") ? c.domain : ".facebook.com",
+      path: c.path || "/",
+    }));
+  }
+  return trimmed
+    .split(";")
+    .map((pair) => pair.trim())
+    .filter(Boolean)
+    .map((pair) => {
+      const i = pair.indexOf("=");
+      return {
+        name: pair.slice(0, i).trim(),
+        value: pair.slice(i + 1).trim(),
+        domain: ".facebook.com",
+        path: "/",
+      };
+    })
+    .filter((c) => c.name && c.value);
+}
+
+let SIGNED_IN = false;
+
+async function newContext(browser) {
+  const context = await browser.newContext({
+    userAgent: UA,
+    locale: "ms-MY",
+    viewport: { width: 1280, height: 1400 },
+  });
+
+  const raw = process.env.FB_COOKIES;
+  if (!raw?.trim()) {
+    console.log("Tiada FB_COOKIES - mengimbas tanpa log masuk.\n");
+    return context;
+  }
+
+  try {
+    const cookies = parseCookies(raw);
+    // `c_user` is the account id and `xs` the session; without both, Facebook
+    // treats the visit as signed out and we would never notice.
+    const names = new Set(cookies.map((c) => c.name));
+    if (!names.has("c_user") || !names.has("xs")) {
+      console.log("FB_COOKIES tiada c_user/xs - mengimbas tanpa log masuk.\n");
+      return context;
+    }
+    await context.addCookies(cookies);
+    SIGNED_IN = true;
+    console.log(`Log masuk dengan sesi tersimpan (${cookies.length} kuki).\n`);
+  } catch (e) {
+    console.log(`FB_COOKIES tidak boleh dibaca (${e.message}) - tanpa log masuk.\n`);
+  }
+  return context;
+}
+
 /** Facebook re-inserts the login dialog constantly; it blocks scroll and clicks. */
 const KILL_DIALOG = () => {
   setInterval(() => {
@@ -214,25 +292,39 @@ function stripByline(text) {
   return lines.slice(start).join("\n").trim();
 }
 
-async function readPage(browser, url) {
-  const page = await browser.newPage({ userAgent: UA, locale: "ms-MY", viewport: { width: 1280, height: 1400 } });
-  await page.addInitScript(KILL_DIALOG);
+async function readPage(context, url) {
+  const page = await context.newPage();
+  if (!SIGNED_IN) await page.addInitScript(KILL_DIALOG);
 
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
     await page.waitForTimeout(2500);
 
-    // Two scrolls, not five. Logged out, Facebook renders what it is going to
-    // render on first paint; the extra three passes were 4.5 seconds a page
-    // that never once produced another post. That time is worth more spent on
-    // looking again sooner.
-    for (let i = 0; i < 2; i++) {
+    // Signed out, Facebook renders what it is going to render on first paint
+    // and scrolling produces nothing — two passes were already generous.
+    // Signed in, the feed keeps loading, and scrolling is the entire point:
+    // that is what turns one post per visit into a week of them.
+    const passes = SIGNED_IN ? 8 : 2;
+    for (let i = 0; i < passes; i++) {
       await page.evaluate(() => window.scrollBy(0, 3000));
       await page.waitForTimeout(1200);
     }
 
     await page.evaluate(EXPAND);
     await page.waitForTimeout(1500);
+
+    if (SIGNED_IN) {
+      // A session that has been revoked or expired still loads the Page — it
+      // just serves the signed-out view. Without this the run would look
+      // healthy while quietly collecting one post per Page again.
+      const walled = await page.evaluate(() =>
+        Boolean(document.querySelector('input[name="pass"], [data-testid="royal_login_form"]')),
+      );
+      if (walled) {
+        SIGNED_IN = false;
+        console.log("  SESI TAMAT - Facebook memaparkan skrin log masuk. Perbaharui FB_COOKIES.");
+      }
+    }
 
     const raw = await page.evaluate(READ_POSTS);
     return raw
@@ -300,12 +392,15 @@ let lastSent = "";
 /** One window of Pages: read them, send whatever came back. */
 async function pass() {
   const browser = await chromium.launch();
+  const context = await newContext(browser);
   const items = [];
   try {
     const turnOf = window_(pages);
-    console.log(`Mengimbas ${turnOf.length} daripada ${pages.length} page…`);
+    console.log(
+      `Mengimbas ${turnOf.length} daripada ${pages.length} page… ${SIGNED_IN ? "(log masuk)" : "(tanpa log masuk)"}`,
+    );
     for (const url of turnOf) {
-      const posts = await readPage(browser, url);
+      const posts = await readPage(context, url);
       const berpautan = posts.filter((p) => p.link).length;
       console.log(`  ${posts.length} siaran (${berpautan} berpautan)  ${url}`);
       for (const [i, post] of posts.entries()) {
@@ -327,6 +422,7 @@ async function pass() {
       }
     }
   } finally {
+    await context.close();
     await browser.close();
   }
 

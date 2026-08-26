@@ -84,6 +84,10 @@ jobs:
         env:
           CME_FINDER_URL: ${{ secrets.CME_FINDER_URL }}
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+          # Optional. A Facebook session for a throwaway account, which turns one
+          # post per Page into the whole feed. Absent or expired, the scraper
+          # falls back to the signed-out view rather than failing.
+          FB_COOKIES: ${{ secrets.FB_COOKIES }}
           FB_RUN_EVERY_MS: "480000"
           FB_PAGES_PER_RUN: ${{ inputs.pages_per_run || '8' }}
           FB_LOOP_MINUTES: ${{ inputs.loop_minutes || '50' }}
