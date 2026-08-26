@@ -99,8 +99,9 @@ function parseCookies(raw) {
 }
 
 let SIGNED_IN = false;
+let HAVE_SESSION = false;
 
-async function newContext(browser) {
+async function newContext(browser, useSession) {
   const context = await browser.newContext({
     userAgent: UA,
     locale: "ms-MY",
@@ -108,8 +109,8 @@ async function newContext(browser) {
   });
 
   const raw = process.env.FB_COOKIES;
-  if (!raw?.trim()) {
-    console.log("Tiada FB_COOKIES - mengimbas tanpa log masuk.\n");
+  if (!useSession || !raw?.trim()) {
+    SIGNED_IN = false;
     return context;
   }
 
@@ -119,14 +120,16 @@ async function newContext(browser) {
     // treats the visit as signed out and we would never notice.
     const names = new Set(cookies.map((c) => c.name));
     if (!names.has("c_user") || !names.has("xs")) {
-      console.log("FB_COOKIES tiada c_user/xs - mengimbas tanpa log masuk.\n");
+      console.log("FB_COOKIES tiada c_user/xs - imbasan dalam dilangkau.");
+      SIGNED_IN = false;
       return context;
     }
     await context.addCookies(cookies);
     SIGNED_IN = true;
-    console.log(`Log masuk dengan sesi tersimpan (${cookies.length} kuki).\n`);
+    HAVE_SESSION = true;
   } catch (e) {
-    console.log(`FB_COOKIES tidak boleh dibaca (${e.message}) - tanpa log masuk.\n`);
+    console.log(`FB_COOKIES tidak boleh dibaca (${e.message}).`);
+    SIGNED_IN = false;
   }
   return context;
 }
@@ -298,20 +301,59 @@ async function readPage(context, url) {
 
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
-    await page.waitForTimeout(2500);
+    // The signed-in Page is a far heavier render — measured returning nothing
+    // at 2.8 seconds and five posts at 5. Judging it too early looked exactly
+    // like the session had failed.
+    await page.waitForTimeout(SIGNED_IN ? 5000 : 2500);
 
-    // Signed out, Facebook renders what it is going to render on first paint
-    // and scrolling produces nothing — two passes were already generous.
-    // Signed in, the feed keeps loading, and scrolling is the entire point:
-    // that is what turns one post per visit into a week of them.
-    const passes = SIGNED_IN ? 8 : 2;
-    for (let i = 0; i < passes; i++) {
-      await page.evaluate(() => window.scrollBy(0, 3000));
-      await page.waitForTimeout(1200);
-    }
+    // Harvest while scrolling, not once at the end.
+    //
+    // Facebook drops an article out of the DOM as soon as it leaves the
+    // viewport, so a feed that has scrolled past twenty posts still holds two
+    // or three. Reading once at the bottom was throwing away almost
+    // everything the scroll had loaded: measured on JKN Kelantan, seven posts
+    // collected on the way down against zero found at the end.
+    //
+    // `mouse.wheel` rather than `window.scrollBy`, because the real feed
+    // sometimes sits in its own scroll container and the window never moves.
+    const seen = new Map();
+    const harvest = async () => {
+      for (const post of await page.evaluate(READ_POSTS)) {
+        // Keyed on the opening words, never on the link.
+        //
+        // The permalink is attached lazily, so the same post is seen first
+        // without one and later with. Keying on the link made those two
+        // entries; keying on the text makes them one, and the link is kept
+        // from whichever pass actually found it.
+        const key = post.text.slice(0, 120);
+        const prev = seen.get(key);
+        seen.set(key, { text: post.text, link: post.link ?? prev?.link ?? null });
+      }
+    };
 
     await page.evaluate(EXPAND);
+    await page.waitForTimeout(1200);
+    await harvest();
+
+    const passes = SIGNED_IN ? 14 : 2;
+    for (let i = 0; i < passes; i++) {
+      await page.mouse.wheel(0, 2200);
+      // Two beats, not one. Text renders first and the permalink is attached
+      // a moment later, so a single short pause harvested the words and left
+      // the link behind on every post.
+      await page.waitForTimeout(900);
+      await harvest();
+      await page.waitForTimeout(900);
+      // Expanding again matters on the way down: each newly loaded post
+      // arrives truncated with its own "Lihat seterusnya".
+      if (i % 4 === 3) await page.evaluate(EXPAND);
+      await harvest();
+    }
+
+    // One last look once the feed has stopped moving: permalinks that were
+    // still loading during the scroll are attached by now.
     await page.waitForTimeout(1500);
+    await harvest();
 
     if (SIGNED_IN) {
       // A session that has been revoked or expired still loads the Page — it
@@ -326,8 +368,7 @@ async function readPage(context, url) {
       }
     }
 
-    const raw = await page.evaluate(READ_POSTS);
-    return raw
+    return [...seen.values()]
       .map((p) => ({ text: reflow(stripFooter(stripByline(p.text))), link: p.link }))
       .filter((p) => p.text.length > 60);
   } catch (e) {
@@ -389,15 +430,30 @@ function hash(s) {
  */
 let lastSent = "";
 
-/** One window of Pages: read them, send whatever came back. */
-async function pass() {
+/**
+ * Two kinds of pass, because signing in trades one thing for another.
+ *
+ * Measured on the same Pages with the same code: signed out returns exactly
+ * one post per Page in about eight seconds, and it always carries the
+ * permalink. Signed in returns one to six, takes thirty seconds a Page, and
+ * carries no permalink at all — the link is attached a moment after the text
+ * and Facebook recycles the article out of the DOM before it arrives.
+ *
+ * So the quick pass runs every eight minutes and keeps "siaran asal" pointing
+ * at the exact post, and a deep signed-in sweep runs roughly hourly to pick up
+ * anything the quick pass was too late to see. Both feed the same door and
+ * dedup sorts out the overlap. It also keeps the signed-in account down to a
+ * few hundred page loads a day rather than over a thousand.
+ */
+async function pass(deep) {
   const browser = await chromium.launch();
-  const context = await newContext(browser);
+  const context = await newContext(browser, deep);
   const items = [];
   try {
-    const turnOf = window_(pages);
+    // A deep sweep reads everything; the quick pass reads its window.
+    const turnOf = SIGNED_IN ? pages : window_(pages);
     console.log(
-      `Mengimbas ${turnOf.length} daripada ${pages.length} page… ${SIGNED_IN ? "(log masuk)" : "(tanpa log masuk)"}`,
+      `Mengimbas ${turnOf.length} daripada ${pages.length} page… ${SIGNED_IN ? "(dalam, log masuk)" : "(pantas)"}`,
     );
     for (const url of turnOf) {
       const posts = await readPage(context, url);
@@ -490,9 +546,11 @@ const until = Date.now() + LOOP_MS;
 for (let n = 1; ; n++) {
   const started = Date.now();
   console.log(`\n--- pusingan ${n} @ ${new Date().toISOString().slice(11, 19)} ---`);
+  // Every seventh eight-minute pass is roughly hourly.
+  const deep = Boolean(process.env.FB_COOKIES?.trim()) && n % 7 === 1;
   let sent = false;
   try {
-    sent = await pass();
+    sent = await pass(deep);
   } catch (e) {
     // One bad pass must not end the hour; the next one is minutes away.
     console.log(`  GAGAL: ${e.message.split("\n")[0]}`);
