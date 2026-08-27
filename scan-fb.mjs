@@ -261,6 +261,23 @@ function reflow(raw) {
 }
 
 /**
+ * A reader's comment is not the Page's post.
+ *
+ * Facebook marks comments with role="article" too, so they arrive alongside
+ * real posts and get parsed as though the department had written them. One
+ * stored row read "maaf tanya, sy ada join live ni utk dptkan e-sijil" — a
+ * member of the public asking where their certificate was, ingested as a CME
+ * announcement.
+ *
+ * A comment always carries a bare "Reply" or "Balas" line and never carries a
+ * post permalink. Requiring both keeps a real post that merely quotes the word.
+ */
+function isComment(text, link) {
+  if (link) return false;
+  return /^(Reply|Balas)$/im.test(text) || /^Author$/im.test(text.trimStart());
+}
+
+/**
  * Everything from the reaction bar down belongs to Facebook and its readers.
  *
  * Below it sit reaction counts and then other people's comments, which were
@@ -369,6 +386,7 @@ async function readPage(context, url) {
     }
 
     return [...seen.values()]
+      .filter((p) => !isComment(p.text, p.link))
       .map((p) => ({ text: reflow(stripFooter(stripByline(p.text))), link: p.link }))
       .filter((p) => p.text.length > 60);
   } catch (e) {
