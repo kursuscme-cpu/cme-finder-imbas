@@ -1,0 +1,31 @@
+name: Uji bacaan Facebook
+
+# Throwaway. Answers one question: how many posts can a signed-out visitor
+# read from a Page? Delete once the answer is known.
+on:
+  workflow_dispatch:
+    inputs:
+      pages:
+        description: "Page yang hendak diuji, dipisah koma"
+        default: "NutritionistPerak,HealthofKelantan,jknperlis"
+
+jobs:
+  uji:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-1.62.1-${{ runner.os }}
+      - run: |
+          npm init -y >/dev/null
+          npm i --no-audit --no-fund playwright@1.62.1
+          npx playwright install --with-deps chromium
+      - run: node probe.mjs
+        env:
+          PROBE_PAGES: ${{ inputs.pages }}
