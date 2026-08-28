@@ -1,15 +1,18 @@
 import { chromium } from "playwright";
 
 /**
- * How many posts can a signed-out visitor actually read from a Facebook Page?
+ * Two questions, measured on all seventeen Pages at once.
  *
- * The scraper takes two scroll passes when signed out, on the belief that
- * Facebook serves a signed-out visitor only the single most recent post. If
- * that belief is right, nothing here will beat it. If it is wrong, we have
- * been discarding posts we could have had — and a CME announced five minutes
- * before an untitled video is lost for good.
+ * 1. Which URL form actually returns the post? The first probe found jknperlis
+ *    giving nothing on `www.facebook.com/jknperlis` and the post on both
+ *    `/posts` and `m.facebook.com` — so some of the zeroes we have been
+ *    reading as "Facebook is flaky" may be our own choice of URL.
+ * 2. How long does a full sweep of all seventeen take? Facebook serves a
+ *    signed-out visitor exactly one post, so the only defence against missing
+ *    one is to come back before the Page posts again. That makes sweep time
+ *    the number that decides how much we miss.
  *
- * Throwaway. Delete once the answer is known.
+ * Throwaway.
  */
 
 const UA =
@@ -25,15 +28,10 @@ const KILL_DIALOG = () => {
 };
 
 const EXPAND = () => {
-  let n = 0;
   const wanted = /^(lihat seterusnya|lihat lagi|see more)$/i;
   for (const el of document.querySelectorAll('div[role="button"], span, a')) {
-    if (wanted.test((el.textContent || "").trim())) {
-      el.click();
-      n++;
-    }
+    if (wanted.test((el.textContent || "").trim())) el.click();
   }
-  return n;
 };
 
 const READ_POSTS = () =>
@@ -47,13 +45,25 @@ const READ_POSTS = () =>
     }))
     .filter((p) => p.text.length > 60);
 
-/** mbasic renders server-side HTML with no role="article" at all. */
-const READ_MBASIC = () =>
-  [...document.querySelectorAll("#m_story_permalink_view, div[data-ft], article")]
-    .map((el) => ({ text: el.innerText || "", link: null }))
-    .filter((p) => p.text.length > 60);
+/** `/posts` cannot be appended to a `profile.php?id=` URL; use the timeline tab. */
+function variant(url, kind) {
+  const u = new URL(url);
+  if (kind === "m") {
+    u.hostname = "m.facebook.com";
+    return u.toString();
+  }
+  if (kind === "posts") {
+    if (u.pathname.startsWith("/profile.php")) {
+      u.searchParams.set("sk", "timeline");
+      return u.toString();
+    }
+    u.pathname = u.pathname.replace(/\/$/, "") + "/posts";
+    return u.toString();
+  }
+  return url;
+}
 
-async function tryOne(browser, { label, url, passes, reader }) {
+async function readOne(browser, url) {
   const context = await browser.newContext({
     userAgent: UA,
     locale: "ms-MY",
@@ -62,56 +72,51 @@ async function tryOne(browser, { label, url, passes, reader }) {
   const page = await context.newPage();
   await page.addInitScript(KILL_DIALOG);
   const seen = new Map();
-
+  const t0 = Date.now();
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
     await page.waitForTimeout(2500);
-
     const harvest = async () => {
-      for (const p of await page.evaluate(reader)) {
+      for (const p of await page.evaluate(READ_POSTS)) {
         const key = p.text.slice(0, 120);
-        const prev = seen.get(key);
-        seen.set(key, { text: p.text, link: p.link ?? prev?.link ?? null });
+        seen.set(key, { text: p.text, link: p.link ?? seen.get(key)?.link ?? null });
       }
     };
-
     await page.evaluate(EXPAND);
     await page.waitForTimeout(1200);
     await harvest();
-
-    for (let i = 0; i < passes; i++) {
+    for (let i = 0; i < 2; i++) {
       await page.mouse.wheel(0, 2200);
       await page.waitForTimeout(900);
       await harvest();
       await page.waitForTimeout(900);
-      if (i % 4 === 3) await page.evaluate(EXPAND);
       await harvest();
     }
-    await harvest();
-
     const rows = [...seen.values()];
-    console.log(`\n  ${label.padEnd(26)} ${String(rows.length).padStart(2)} siaran  (${rows.filter((r) => r.link).length} berpautan)`);
-    for (const r of rows) {
-      console.log(`      ${r.link ? "L" : "-"} ${r.text.replace(/\s+/g, " ").slice(0, 78)}`);
-    }
-    return rows.length;
+    return { n: rows.length, linked: rows.filter((r) => r.link).length, ms: Date.now() - t0 };
   } catch (e) {
-    console.log(`\n  ${label.padEnd(26)} GAGAL: ${e.message.slice(0, 70)}`);
-    return -1;
+    return { n: -1, linked: 0, ms: Date.now() - t0, err: e.message.slice(0, 40) };
   } finally {
     await context.close();
   }
 }
 
-const PAGES = (process.env.PROBE_PAGES ?? "NutritionistPerak,HealthofKelantan,jknperlis").split(",");
-
+const URLS = (process.env.PROBE_URLS ?? "").split(",").filter(Boolean);
 const browser = await chromium.launch();
-for (const p of PAGES) {
-  console.log(`\n=================== ${p} ===================`);
-  await tryOne(browser, { label: "www, 2 tatal (sekarang)", url: `https://www.facebook.com/${p}`, passes: 2, reader: READ_POSTS });
-  await tryOne(browser, { label: "www, 12 tatal", url: `https://www.facebook.com/${p}`, passes: 12, reader: READ_POSTS });
-  await tryOne(browser, { label: "www /posts, 12 tatal", url: `https://www.facebook.com/${p}/posts`, passes: 12, reader: READ_POSTS });
-  await tryOne(browser, { label: "m.facebook, 12 tatal", url: `https://m.facebook.com/${p}`, passes: 12, reader: READ_POSTS });
-  await tryOne(browser, { label: "mbasic, 6 tatal", url: `https://mbasic.facebook.com/${p}`, passes: 6, reader: READ_MBASIC });
+
+for (const kind of ["www", "posts", "m"]) {
+  console.log(`\n=================== bentuk: ${kind} ===================`);
+  const t0 = Date.now();
+  let dapat = 0;
+  for (const url of URLS) {
+    const target = variant(url, kind);
+    const r = await readOne(browser, target);
+    if (r.n > 0) dapat++;
+    const nama = new URL(url).pathname.replace(/\//g, "") || new URL(url).search.slice(0, 22);
+    console.log(
+      `  ${nama.slice(0, 30).padEnd(31)} ${String(r.n).padStart(2)} siaran  ${String(r.linked)} pautan  ${String(Math.round(r.ms / 1000)).padStart(3)}s ${r.err ?? ""}`,
+    );
+  }
+  console.log(`  --> ${dapat}/${URLS.length} page memberi siaran, pusingan penuh ${Math.round((Date.now() - t0) / 1000)}s`);
 }
 await browser.close();
