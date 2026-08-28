@@ -1,18 +1,16 @@
 name: Uji bacaan Facebook
 
-# Throwaway. Answers one question: how many posts can a signed-out visitor
-# read from a Page? Delete once the answer is known.
 on:
   workflow_dispatch:
     inputs:
-      pages:
-        description: "Page yang hendak diuji, dipisah koma"
-        default: "NutritionistPerak,HealthofKelantan,jknperlis"
+      urls:
+        description: "URL page dipisah koma"
+        required: true
 
 jobs:
   uji:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -28,4 +26,4 @@ jobs:
           npx playwright install --with-deps chromium
       - run: node probe.mjs
         env:
-          PROBE_PAGES: ${{ inputs.pages }}
+          PROBE_URLS: ${{ inputs.urls }}
