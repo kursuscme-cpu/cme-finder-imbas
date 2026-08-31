@@ -11,6 +11,7 @@
  *
  * Env: CME_FINDER_URL, INGEST_SECRET, optional FB_PAGES (comma separated).
  */
+import { postedAtFrom } from "./umur.mjs";
 import { chromium } from "playwright";
 import { readFileSync } from "node:fs";
 
@@ -387,7 +388,12 @@ async function readPage(context, url) {
 
     return [...seen.values()]
       .filter((p) => !isComment(p.text, p.link))
-      .map((p) => ({ text: reflow(stripFooter(stripByline(p.text))), link: p.link }))
+      .map((p) => ({
+        text: reflow(stripFooter(stripByline(p.text))),
+        link: p.link,
+        // Read before the byline is stripped, from the untouched innerText.
+        postedAt: postedAtFrom(p.text),
+      }))
       .filter((p) => p.text.length > 60);
   } catch (e) {
     console.log(`  GAGAL ${url}: ${e.message.split("\n")[0]}`);
@@ -476,7 +482,10 @@ async function pass(deep) {
     for (const url of turnOf) {
       const posts = await readPage(context, url);
       const berpautan = posts.filter((p) => p.link).length;
-      console.log(`  ${posts.length} siaran (${berpautan} berpautan)  ${url}`);
+      // Print the age each post reported, so a real run is the proof that
+      // the byline is being read - not a test asserting that it should be.
+      const umur = posts.map((p) => p.postedAt?.slice(5, 16) ?? "?").join(" ");
+      console.log(`  ${posts.length} siaran (${berpautan} berpautan) [${umur}]  ${url}`);
       for (const [i, post] of posts.entries()) {
         items.push({
           text: post.text,
@@ -488,7 +497,7 @@ async function pass(deep) {
           // Page URL. Sending only the permalink would leave every post
           // unattributed.
           pageUrl: url,
-          postedAt: new Date().toISOString(),
+          postedAt: post.postedAt,
           // Same post on the next run must produce the same id, or every scan
           // re-ingests everything. Hash the text rather than trusting position.
           id: `${new URL(url).pathname.replace(/\//g, "")}-${hash(post.text)}-${i === 0 ? "top" : "n"}`,
