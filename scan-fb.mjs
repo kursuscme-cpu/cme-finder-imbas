@@ -313,6 +313,26 @@ function stripByline(text) {
   return lines.slice(start).join("\n").trim();
 }
 
+/**
+ * The same Page, asked a second way.
+ *
+ * Measured 31 August across all seventeen Pages, twice: six returned nothing
+ * at all on www — NutritionistTerengganu, ppwn.terengganu, jknsarawak,
+ * WHPerlis, WellnessHubSadongJaya, jknpenang — while a separate probe found
+ * jknperlis giving nothing on www and its post on m.facebook.com. So part of
+ * what we have been reading as Facebook being flaky is the desktop render
+ * failing where the mobile one does not.
+ *
+ * Only tried when www gave nothing, so a healthy Page costs no extra load.
+ * Attribution still uses the canonical www URL: the app matches a source by
+ * its exact Page URL, and a mobile host would leave every post unattributed.
+ */
+function mobileOf(url) {
+  const u = new URL(url);
+  u.hostname = "m.facebook.com";
+  return u.toString();
+}
+
 async function readPage(context, url) {
   const page = await context.newPage();
   if (!SIGNED_IN) await page.addInitScript(KILL_DIALOG);
@@ -480,7 +500,8 @@ async function pass(deep) {
       `Mengimbas ${turnOf.length} daripada ${pages.length} page… ${SIGNED_IN ? "(dalam, log masuk)" : "(pantas)"}`,
     );
     for (const url of turnOf) {
-      const posts = await readPage(context, url);
+      let posts = await readPage(context, url);
+      if (posts.length === 0) posts = await readPage(context, mobileOf(url));
       const berpautan = posts.filter((p) => p.link).length;
       // Print the age each post reported, so a real run is the proof that
       // the byline is being read - not a test asserting that it should be.
