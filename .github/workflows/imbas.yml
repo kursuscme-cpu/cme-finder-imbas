@@ -80,6 +80,12 @@ jobs:
             npx playwright install --with-deps chromium
           fi
 
+      # The post age drives every relative date ("Pada petang ini"). When it
+      # was wrong, a session from 27 August was re-announced on 30 August with
+      # a start time equal to the scan. Two seconds here, before any scraping.
+      - name: Semak pembaca umur siaran
+        run: node umur.test.mjs
+
       - name: Imbas dan hantar
         env:
           CME_FINDER_URL: ${{ secrets.CME_FINDER_URL }}
